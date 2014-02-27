@@ -1,0 +1,170 @@
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.TreeMap;
+
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.conf.*;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.*;
+import org.apache.hadoop.mapreduce.Mapper.Context;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+
+
+public class TopTenZipcodes {
+
+	public static class Map1 extends Mapper<LongWritable, Text, Text, IntWritable> {
+		private IntWritable age = new IntWritable();
+		private Text zipcode = new Text();
+
+		public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
+			//read line from users.dat
+			String line = value.toString();
+			//tokenize line on '::'
+			String[] lineTokens = line.split("::");
+			
+			if(lineTokens[2] != null && lineTokens[2].length() != 0 && lineTokens[4] != null && lineTokens[4].length() != 0){
+				zipcode.set(lineTokens[4]);
+				age.set((int)Integer.parseInt(lineTokens[2]));
+				//output the zipcode and age of each user
+				context.write(zipcode, age);
+			}
+
+		}
+	} 
+
+	public static class Reduce1 extends Reducer<Text, IntWritable, Text, DoubleWritable> {
+
+		public void reduce(Text key, Iterable<IntWritable> values, Context context) 
+				throws IOException, InterruptedException {
+			double sum = 0;
+			double count = 0;
+			
+			//iterate through the list of values for each zipcode
+			for (IntWritable val : values) {
+				sum += val.get();
+				count++;
+			}
+			//calculate average age for the zipcode
+			double avgAge = sum/count;
+			//output the zipcode and average age for the zipcode
+			context.write(key, new DoubleWritable(avgAge));
+		}
+	}
+
+	public static class Map2 extends Mapper<LongWritable, Text, NullWritable, Text> {
+		private Text treeKey;
+		//start TreeMap to store results in ascending order
+		private TreeMap<Text, Text> topTen = new TreeMap<Text, Text>();
+		private Text treeValue;
+		
+		public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
+			//read zipcode and average age
+			String line = value.toString();
+			String[] lineTokens = line.split("\\t");
+			
+			if(lineTokens[0] != null && lineTokens[0].length() != 0 && lineTokens[1] != null && lineTokens[1].length() != 0){
+				//set treeKey to avgAge and zipcode
+				treeKey = new Text(lineTokens[1]+lineTokens[0]);
+				//set treeValue to zipcode and avgAge
+				treeValue = new Text(lineTokens[0]+"|"+lineTokens[1]);
+				//insert record into TreeMap
+				topTen.put(treeKey, treeValue);
+				//if tree has more than 10 values remove the largest
+				if(topTen.size() > 10){
+					topTen.remove(topTen.lastKey());
+				}
+			}
+			
+		}
+		
+		public void cleanup(Context context) throws IOException, InterruptedException{
+			for(Text output : topTen.values()){
+				//output the topTen lowest avgAge
+				context.write(NullWritable.get(), output);
+			}
+		}
+	}
+	
+	public static class Reduce2 extends Reducer<NullWritable, Text, Text, DoubleWritable> {
+		private TreeMap<Text, Text> topTen = new TreeMap<Text, Text>();
+		
+	    public void reduce(NullWritable key, Iterable<Text> values, Context context) 
+	      throws IOException, InterruptedException {
+	        
+	        for (Text val : values) {
+	            String[] tokens = val.toString().split("\\|");
+	            //treeKey is set to avgAge + zipcode
+	            Text treeKey = new Text(tokens[1]+tokens[0]);
+	            //treeValue is set to zipcode + avgAge
+	            Text treeValue = new Text(tokens[0]+"|"+tokens[1]);
+	            topTen.put(treeKey, treeValue);
+	            if(topTen.size() > 10){
+	            	topTen.remove(topTen.lastKey());
+	            }
+	        }
+	    }
+	    
+	    public void cleanup(Context context) throws IOException, InterruptedException{
+	    	
+	    	//write the output in descending order of average age
+	    	for(Text treeKey : topTen.descendingKeySet()){
+	    		String[] values = topTen.get(treeKey).toString().split("\\|");
+	    		Text zipcode = new Text(values[0]);
+	    		DoubleWritable avgAge = new DoubleWritable(Double.parseDouble(values[1]));
+	    		context.write(zipcode, avgAge);
+	    	}
+	    	/*for(Text treeValue : topTen.values()){
+	    		String[] values = treeValue.toString().split("\\|");
+	    		Text zipcode = new Text(values[0]);
+	    		DoubleWritable avgAge = new DoubleWritable(Double.parseDouble(values[1]));
+	    		context.write(zipcode, avgAge);
+	    	}*/
+	    }
+	 }
+
+	public static void main(String[] args) throws Exception {
+
+		Configuration conf1 = new Configuration();        
+		Job job1 = new Job(conf1, "CalulateAverageAge");
+
+		job1.setMapOutputKeyClass(Text.class);
+		job1.setMapOutputValueClass(IntWritable.class);
+		job1.setOutputKeyClass(Text.class);
+		job1.setOutputValueClass(DoubleWritable.class);
+		job1.setJarByClass(TopTenZipcodes.class);
+		job1.setMapperClass(Map1.class);
+		job1.setReducerClass(Reduce1.class);
+
+		job1.setInputFormatClass(TextInputFormat.class);
+		job1.setOutputFormatClass(TextOutputFormat.class);
+
+		FileInputFormat.addInputPath(job1, new Path(args[0]));
+		FileOutputFormat.setOutputPath(job1, new Path("/user/jxs120931/ZipcodeAverageAge"));
+
+		job1.waitForCompletion(true);
+		
+		if(job1.isSuccessful()){
+			Configuration conf2 = new Configuration();
+			Job job2 = new Job(conf2, "GetTopTenZipcodes");
+
+			job2.setMapOutputKeyClass(NullWritable.class);
+			job2.setMapOutputValueClass(Text.class);
+			job2.setOutputKeyClass(Text.class);
+			job2.setOutputValueClass(DoubleWritable.class);
+			job2.setJarByClass(TopTenZipcodes.class);
+			job2.setMapperClass(Map2.class);
+			job2.setReducerClass(Reduce2.class);
+
+			job2.setInputFormatClass(TextInputFormat.class);
+			job2.setOutputFormatClass(TextOutputFormat.class);
+
+			FileInputFormat.addInputPath(job2, new Path("/user/jxs120931/ZipcodeAverageAge/part-r-00000"));
+			FileOutputFormat.setOutputPath(job2, new Path(args[1]));
+
+			job2.waitForCompletion(true);
+		}
+	}
+}
